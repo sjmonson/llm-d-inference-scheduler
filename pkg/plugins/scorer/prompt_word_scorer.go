@@ -26,6 +26,10 @@ const (
 	// defaultWordScorerRequestTimeout defines the default timeout for open requests to be
 	// considered stale and removed from the cache.
 	defaultWordScorerRequestTimeout = 2 * time.Minute
+
+	// promptWordScorerLogLevel defines the verbosity level for PromptWordScorer logs.
+	// Set to logutil.DEFAULT to always show these logs at normal verbosity.
+	promptWordScorerLogLevel = logutil.DEBUG
 )
 
 // PromptWordScorerParameters defines the parameters for the
@@ -162,7 +166,7 @@ func (s *PromptWordScorer) Score(ctx context.Context, _ *types.CycleState, _ *ty
 	}
 	s.mutex.RUnlock()
 
-	log.FromContext(ctx).V(logutil.DEBUG).Info("Prompt word scorer counts",
+	log.FromContext(ctx).V(promptWordScorerLogLevel).Info("Prompt word scorer counts",
 		"podWordCounts", scoredPods, "maxCount", maxCount)
 
 	scoredPodsMap := make(map[types.Pod]float64, len(pods))
@@ -182,7 +186,7 @@ func (s *PromptWordScorer) Score(ctx context.Context, _ *types.CycleState, _ *ty
 		}
 	}
 
-	log.FromContext(ctx).V(logutil.DEBUG).Info("Scored pods by word count", "scores", scoredPodsMap)
+	log.FromContext(ctx).V(promptWordScorerLogLevel).Info("Scored pods by word count", "scores", scoredPodsMap)
 	return scoredPodsMap
 }
 
@@ -194,7 +198,7 @@ func (s *PromptWordScorer) PreRequest(
 	request *types.LLMRequest,
 	schedulingResult *types.SchedulingResult,
 ) {
-	debugLogger := log.FromContext(ctx).V(logutil.DEBUG)
+	debugLogger := log.FromContext(ctx).V(promptWordScorerLogLevel)
 
 	// Extract word count from the request
 	wordCount, err := s.extractWordCount(request)
@@ -244,7 +248,7 @@ func (s *PromptWordScorer) ResponseComplete(
 	_ *requestcontrol.Response,
 	targetPod *backend.Pod,
 ) {
-	debugLogger := log.FromContext(ctx).V(logutil.DEBUG).WithName("PromptWordScorer.ResponseComplete")
+	debugLogger := log.FromContext(ctx).V(promptWordScorerLogLevel).WithName("PromptWordScorer.ResponseComplete")
 	if targetPod == nil {
 		debugLogger.Info("Skipping ResponseComplete because targetPod is nil")
 		return
@@ -283,7 +287,7 @@ func (s *PromptWordScorer) extractWordCount(request *types.LLMRequest) (int64, e
 	if request.Body.ChatCompletions != nil {
 		if request.Body.Completions != nil {
 			// Defensive: both present, prioritize chat (shouldn't happen)
-			log.Log.V(logutil.DEBUG).Info("Both ChatCompletions and Completions present; using ChatCompletions")
+			log.Log.V(promptWordScorerLogLevel).Info("Both ChatCompletions and Completions present; using ChatCompletions")
 		}
 
 		for _, msg := range request.Body.ChatCompletions.Messages {
