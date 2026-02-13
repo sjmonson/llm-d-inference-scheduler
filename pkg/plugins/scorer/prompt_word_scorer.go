@@ -186,7 +186,13 @@ func (s *PromptWordScorer) Score(ctx context.Context, _ *types.CycleState, _ *ty
 		}
 	}
 
-	log.FromContext(ctx).V(promptWordScorerLogLevel).Info("Scored pods by word count", "scores", scoredPodsMap)
+	log.FromContext(ctx).V(promptWordScorerLogLevel).Info("Scored pods by word count", "scores", func() map[string]float64 {
+		m := make(map[string]float64, len(scoredPodsMap))
+		for pod, score := range scoredPodsMap {
+			m[pod.GetPod().NamespacedName.String()] = score
+		}
+		return m
+	}())
 	return scoredPodsMap
 }
 
