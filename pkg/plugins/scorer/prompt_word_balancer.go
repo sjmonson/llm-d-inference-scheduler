@@ -26,20 +26,11 @@ const (
 	// defaultWordBalancerRequestTimeout defines the default timeout for open requests to be
 	// considered stale and removed from the cache.
 	defaultWordBalancerRequestTimeout = 2 * time.Minute
-
-	// defaultDecayFactor defines the default decay factor applied to word counts on ResponseComplete.
-	// A value of 1.0 means no decay (counts persist), 0.0 means full reset.
-	defaultDecayFactor = 1.0
 )
 
 // PromptWordBalancerParameters defines the parameters for the
 // PromptWordBalancer scorer.
 type PromptWordBalancerParameters struct {
-	// DecayFactor defines how much to reduce word counts on ResponseComplete.
-	// Range: 0.0-1.0. Default: 1.0 (no decay).
-	// Example: 0.95 means counts are multiplied by 0.95 on each completion.
-	DecayFactor float64 `json:"decayFactor"`
-
 	// RequestTimeout defines the timeout for requests in seconds.
 	// Once the request is "in-flight" for this duration, it is considered to
 	// be timed out and dropped.
@@ -68,19 +59,12 @@ var _ requestcontrol.ResponseComplete = &PromptWordBalancer{}
 
 // PromptWordBalancerFactory defines the factory function for the PromptWordBalancer scorer.
 func PromptWordBalancerFactory(name string, rawParameters json.RawMessage, handle plugins.Handle) (plugins.Plugin, error) {
-	parameters := PromptWordBalancerParameters{
-		DecayFactor: defaultDecayFactor,
-	}
+	parameters := PromptWordBalancerParameters{}
 
 	if rawParameters != nil {
 		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
 			return nil, fmt.Errorf("failed to parse the parameters of the '%s' scorer - %w", PromptWordBalancerType, err)
 		}
-	}
-
-	// Validate decay factor
-	if parameters.DecayFactor < 0.0 || parameters.DecayFactor > 1.0 {
-		return nil, fmt.Errorf("decay factor must be between 0.0 and 1.0, got %f", parameters.DecayFactor)
 	}
 
 	return NewPromptWordBalancer(handle.Context(), &parameters).WithName(name), nil
@@ -89,7 +73,6 @@ func PromptWordBalancerFactory(name string, rawParameters json.RawMessage, handl
 // NewPromptWordBalancer creates a new PromptWordBalancer scorer.
 func NewPromptWordBalancer(ctx context.Context, params *PromptWordBalancerParameters) *PromptWordBalancer {
 	requestTimeout := defaultWordBalancerRequestTimeout
-	decayFactor := defaultDecayFactor
 	logger := log.FromContext(ctx)
 
 	if params != nil {
@@ -102,10 +85,6 @@ func NewPromptWordBalancer(ctx context.Context, params *PromptWordBalancerParame
 				logger.Info("Using request timeout", "requestTimeout", requestTimeout)
 			}
 		}
-
-		// DecayFactor validation already done in factory
-		decayFactor = params.DecayFactor
-		logger.Info("Using decay factor", "decayFactor", decayFactor)
 	}
 
 	// cache for individual requests with their own TTL
@@ -118,7 +97,6 @@ func NewPromptWordBalancer(ctx context.Context, params *PromptWordBalancerParame
 		typedName:     plugins.TypedName{Type: PromptWordBalancerType},
 		requestCache:  requestCache,
 		podWordCounts: make(map[string]int64),
-		decayFactor:   decayFactor,
 		mutex:         &sync.RWMutex{},
 	}
 
@@ -142,7 +120,7 @@ func NewPromptWordBalancer(ctx context.Context, params *PromptWordBalancerParame
 	return scorer
 }
 
-// PromptWordBalancer keeps track of cumulative prompt word counts
+// PromptWordBalancer keeps track of in-flight prompt word counts
 // per pod to enable balanced distribution.
 type PromptWordBalancer struct {
 	typedName plugins.TypedName
@@ -150,11 +128,8 @@ type PromptWordBalancer struct {
 	// requestCache stores individual request entries with unique composite keys (podName.requestID)
 	requestCache *ttlcache.Cache[string, *wordBalancerRequestEntry]
 
-	// podWordCounts maintains cumulative word counts per pod
+	// podWordCounts maintains in-flight word counts per pod
 	podWordCounts map[string]int64
-
-	// decayFactor is applied to word counts on ResponseComplete (0.0-1.0)
-	decayFactor float64
 
 	mutex *sync.RWMutex
 }
@@ -261,8 +236,8 @@ func (s *PromptWordBalancer) PreRequest(
 }
 
 // ResponseComplete is called after a response is sent to the client.
-// It removes the request entry from the cache and optionally applies
-// decay to the word counts of involved pods.
+// It removes the request entry from the cache and decrements the word counts
+// of involved pods since the request is no longer in-flight.
 func (s *PromptWordBalancer) ResponseComplete(
 	ctx context.Context,
 	request *types.LLMRequest,
@@ -287,22 +262,11 @@ func (s *PromptWordBalancer) ResponseComplete(
 		return
 	}
 
-	// Apply decay factor if configured (decay < 1.0)
-	if s.decayFactor > 0 && s.decayFactor < 1.0 {
-		for _, podName := range entry.PodNames {
-			s.applyDecayToPod(podName, s.decayFactor)
-		}
-		debugLogger.Info("Applied decay to pods", "requestEntry", entry.String(), "decayFactor", s.decayFactor)
-	} else if s.decayFactor == 0.0 {
-		// Full reset: decrement the original word count
-		for _, podName := range entry.PodNames {
-			s.decrementWordCount(podName, entry.WordCount)
-		}
-		debugLogger.Info("Removed request word count from pods (full reset)", "requestEntry", entry.String())
-	} else {
-		// No decay (decayFactor == 1.0): counts persist
-		debugLogger.Info("Request completed, no decay applied", "requestEntry", entry.String())
+	// Remove word count from all involved pods
+	for _, podName := range entry.PodNames {
+		s.decrementWordCount(podName, entry.WordCount)
 	}
+	debugLogger.Info("Removed request word count from pods", "requestEntry", entry.String())
 }
 
 // extractWordCount extracts the word count from the request prompt.
@@ -353,21 +317,6 @@ func (s *PromptWordBalancer) decrementWordCount(podName string, wordCount int64)
 
 	if count, exists := s.podWordCounts[podName]; exists {
 		newCount := count - wordCount
-		if newCount <= 0 {
-			delete(s.podWordCounts, podName)
-		} else {
-			s.podWordCounts[podName] = newCount
-		}
-	}
-}
-
-// applyDecayToPod applies a decay factor to the word count of a pod.
-func (s *PromptWordBalancer) applyDecayToPod(podName string, factor float64) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	if count, exists := s.podWordCounts[podName]; exists {
-		newCount := int64(float64(count) * factor)
 		if newCount <= 0 {
 			delete(s.podWordCounts, podName)
 		} else {

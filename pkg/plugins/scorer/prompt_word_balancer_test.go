@@ -68,15 +68,6 @@ func TestPromptWordBalancer_ParameterParsing(t *testing.T) {
 	t.Run("Default parameters", func(t *testing.T) {
 		scorer := NewPromptWordBalancer(ctx, nil)
 		require.NotNil(t, scorer)
-		assert.Equal(t, defaultDecayFactor, scorer.decayFactor)
-	})
-
-	t.Run("Custom decay factor", func(t *testing.T) {
-		params := &PromptWordBalancerParameters{
-			DecayFactor: 0.9,
-		}
-		scorer := NewPromptWordBalancer(ctx, params)
-		assert.Equal(t, 0.9, scorer.decayFactor)
 	})
 
 	t.Run("Custom request timeout", func(t *testing.T) {
@@ -382,13 +373,12 @@ func TestPromptWordBalancer_PreRequest(t *testing.T) {
 // ResponseComplete Tests
 
 func TestPromptWordBalancer_ResponseComplete(t *testing.T) {
-	t.Run("No decay (decayFactor = 1.0)", func(t *testing.T) {
+	t.Run("Word count removed on completion", func(t *testing.T) {
 		ctx := utils.NewTestContext(t)
-		params := &PromptWordBalancerParameters{DecayFactor: 1.0}
-		scorer := NewPromptWordBalancer(ctx, params)
+		scorer := NewPromptWordBalancer(ctx, nil)
 
 		podA := newWordBalancerTestPod("pod-a")
-		request := newCompletionsRequest("test-request-1", "Hello world test")
+		request := newCompletionsRequest("test-request-1", "This is a test prompt")
 
 		// Setup: add request
 		schedulingResult := &types.SchedulingResult{
@@ -397,74 +387,23 @@ func TestPromptWordBalancer_ResponseComplete(t *testing.T) {
 			},
 		}
 		scorer.PreRequest(ctx, request, schedulingResult)
-		assert.Equal(t, int64(3), scorer.getWordCount("default/pod-a"))
-
-		// Complete request
-		scorer.ResponseComplete(ctx, request, &requestcontrol.Response{}, podA.GetPod())
-
-		// With no decay, word count should persist
-		assert.False(t, scorer.requestCache.Has(request.RequestId), "Request should be removed from cache")
-		assert.Equal(t, int64(3), scorer.getWordCount("default/pod-a"), "Word count should persist with decay=1.0")
-	})
-
-	t.Run("Full reset (decayFactor = 0.0)", func(t *testing.T) {
-		ctx := utils.NewTestContext(t)
-		params := &PromptWordBalancerParameters{DecayFactor: 0.0}
-		scorer := NewPromptWordBalancer(ctx, params)
-
-		podA := newWordBalancerTestPod("pod-a")
-		request := newCompletionsRequest("test-request-2", "This is a longer prompt for testing")
-
-		// Setup: add request
-		schedulingResult := &types.SchedulingResult{
-			ProfileResults: map[string]*types.ProfileRunResult{
-				"test-profile": {TargetPods: []types.Pod{podA}},
-			},
-		}
-		scorer.PreRequest(ctx, request, schedulingResult)
-		assert.Equal(t, int64(7), scorer.getWordCount("default/pod-a"))
-
-		// Complete request
-		scorer.ResponseComplete(ctx, request, &requestcontrol.Response{}, podA.GetPod())
-
-		// With full reset, word count should be removed
-		assert.False(t, scorer.requestCache.Has(request.RequestId))
-		assert.False(t, scorer.hasWordCount("default/pod-a"), "Word count should be removed with decay=0.0")
-	})
-
-	t.Run("Partial decay (decayFactor = 0.5)", func(t *testing.T) {
-		ctx := utils.NewTestContext(t)
-		params := &PromptWordBalancerParameters{DecayFactor: 0.5}
-		scorer := NewPromptWordBalancer(ctx, params)
-
-		podA := newWordBalancerTestPod("pod-a")
-		request := newCompletionsRequest("test-request-3", "One two three four five six seven eight nine ten")
-
-		// Setup: add request
-		schedulingResult := &types.SchedulingResult{
-			ProfileResults: map[string]*types.ProfileRunResult{
-				"test-profile": {TargetPods: []types.Pod{podA}},
-			},
-		}
-		scorer.PreRequest(ctx, request, schedulingResult)
-		assert.Equal(t, int64(10), scorer.getWordCount("default/pod-a"))
-
-		// Complete request
-		scorer.ResponseComplete(ctx, request, &requestcontrol.Response{}, podA.GetPod())
-
-		// With 0.5 decay, word count should be halved: 10 * 0.5 = 5
-		assert.False(t, scorer.requestCache.Has(request.RequestId))
 		assert.Equal(t, int64(5), scorer.getWordCount("default/pod-a"))
+
+		// Complete request
+		scorer.ResponseComplete(ctx, request, &requestcontrol.Response{}, podA.GetPod())
+
+		// Word count should be removed
+		assert.False(t, scorer.requestCache.Has(request.RequestId), "Request should be removed from cache")
+		assert.False(t, scorer.hasWordCount("default/pod-a"), "Word count should be removed on completion")
 	})
 
-	t.Run("Decay with multiple pods (P/D)", func(t *testing.T) {
+	t.Run("Multiple pods (P/D disaggregation)", func(t *testing.T) {
 		ctx := utils.NewTestContext(t)
-		params := &PromptWordBalancerParameters{DecayFactor: 0.8}
-		scorer := NewPromptWordBalancer(ctx, params)
+		scorer := NewPromptWordBalancer(ctx, nil)
 
 		podA := newWordBalancerTestPod("pod-a")
 		podB := newWordBalancerTestPod("pod-b")
-		request := newCompletionsRequest("test-request-4", "Five word test prompt here")
+		request := newCompletionsRequest("test-request-2", "Five word test prompt here")
 
 		// Setup: add request to both pods
 		schedulingResult := &types.SchedulingResult{
@@ -480,10 +419,10 @@ func TestPromptWordBalancer_ResponseComplete(t *testing.T) {
 		// Complete request
 		scorer.ResponseComplete(ctx, request, &requestcontrol.Response{}, podA.GetPod())
 
-		// Both pods should have decay applied: 5 * 0.8 = 4
+		// Both pods should have word counts removed
 		assert.False(t, scorer.requestCache.Has(request.RequestId))
-		assert.Equal(t, int64(4), scorer.getWordCount("default/pod-a"))
-		assert.Equal(t, int64(4), scorer.getWordCount("default/pod-b"))
+		assert.False(t, scorer.hasWordCount("default/pod-a"))
+		assert.False(t, scorer.hasWordCount("default/pod-b"))
 	})
 
 	t.Run("Request not in cache (already completed or TTL expired)", func(t *testing.T) {
@@ -504,7 +443,7 @@ func TestPromptWordBalancer_ResponseComplete(t *testing.T) {
 		ctx := utils.NewTestContext(t)
 		scorer := NewPromptWordBalancer(ctx, nil)
 
-		request := newCompletionsRequest("test-request-5", "Test prompt")
+		request := newCompletionsRequest("test-request-3", "Test prompt")
 
 		// Call ResponseComplete with nil targetPod
 		scorer.ResponseComplete(ctx, request, &requestcontrol.Response{}, nil)
@@ -521,7 +460,6 @@ func TestPromptWordBalancer_TTLExpiration(t *testing.T) {
 	// Use very short timeout for test
 	params := &PromptWordBalancerParameters{
 		RequestTimeout: "1s",
-		DecayFactor:    1.0,
 	}
 	scorer := NewPromptWordBalancer(ctx, params)
 
