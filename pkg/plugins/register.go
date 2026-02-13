@@ -19,7 +19,7 @@ func RegisterAllPlugins() {
 	plugins.Register(profile.PdProfileHandlerType, profile.PdProfileHandlerFactory)
 	plugins.Register(scorer.PrecisePrefixCachePluginType, scorer.PrecisePrefixCachePluginFactory)
 	plugins.Register(scorer.LoadAwareType, scorer.LoadAwareFactory)
-	plugins.Register(scorer.PromptWordBalancerType, scorer.PromptWordBalancerFactory)
+	plugins.Register(scorer.PromptWordScorerType, scorer.PromptWordScorerFactory)
 	plugins.Register(scorer.SessionAffinityType, scorer.SessionAffinityFactory)
 	plugins.Register(scorer.ActiveRequestType, scorer.ActiveRequestFactory)
 	plugins.Register(scorer.NoHitLRUType, scorer.NoHitLRUFactory)

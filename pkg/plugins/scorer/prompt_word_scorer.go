@@ -20,17 +20,17 @@ import (
 )
 
 const (
-	// PromptWordBalancerType is the type of the PromptWordBalancer scorer.
-	PromptWordBalancerType = "prompt-word-balancer"
+	// PromptWordScorerType is the type of the PromptWordScorer scorer.
+	PromptWordScorerType = "prompt-word-scorer"
 
-	// defaultWordBalancerRequestTimeout defines the default timeout for open requests to be
+	// defaultWordScorerRequestTimeout defines the default timeout for open requests to be
 	// considered stale and removed from the cache.
-	defaultWordBalancerRequestTimeout = 2 * time.Minute
+	defaultWordScorerRequestTimeout = 2 * time.Minute
 )
 
-// PromptWordBalancerParameters defines the parameters for the
-// PromptWordBalancer scorer.
-type PromptWordBalancerParameters struct {
+// PromptWordScorerParameters defines the parameters for the
+// PromptWordScorer scorer.
+type PromptWordScorerParameters struct {
 	// RequestTimeout defines the timeout for requests in seconds.
 	// Once the request is "in-flight" for this duration, it is considered to
 	// be timed out and dropped.
@@ -38,8 +38,8 @@ type PromptWordBalancerParameters struct {
 	RequestTimeout string `json:"requestTimeout"`
 }
 
-// wordBalancerRequestEntry represents a single request in the cache
-type wordBalancerRequestEntry struct {
+// wordScorerRequestEntry represents a single request in the cache
+type wordScorerRequestEntry struct {
 	PodNames  []string
 	RequestID string
 	WordCount int64
@@ -47,32 +47,32 @@ type wordBalancerRequestEntry struct {
 }
 
 // String returns a string representation of the request entry.
-func (r wordBalancerRequestEntry) String() string {
+func (r wordScorerRequestEntry) String() string {
 	return fmt.Sprintf("%s:%s (words=%d, at=%s)",
 		r.RequestID, strings.Join(r.PodNames, "."), r.WordCount, r.Timestamp.Format(time.RFC3339))
 }
 
 // compile-time type assertion
-var _ framework.Scorer = &PromptWordBalancer{}
-var _ requestcontrol.PreRequest = &PromptWordBalancer{}
-var _ requestcontrol.ResponseComplete = &PromptWordBalancer{}
+var _ framework.Scorer = &PromptWordScorer{}
+var _ requestcontrol.PreRequest = &PromptWordScorer{}
+var _ requestcontrol.ResponseComplete = &PromptWordScorer{}
 
-// PromptWordBalancerFactory defines the factory function for the PromptWordBalancer scorer.
-func PromptWordBalancerFactory(name string, rawParameters json.RawMessage, handle plugins.Handle) (plugins.Plugin, error) {
-	parameters := PromptWordBalancerParameters{}
+// PromptWordScorerFactory defines the factory function for the PromptWordScorer scorer.
+func PromptWordScorerFactory(name string, rawParameters json.RawMessage, handle plugins.Handle) (plugins.Plugin, error) {
+	parameters := PromptWordScorerParameters{}
 
 	if rawParameters != nil {
 		if err := json.Unmarshal(rawParameters, &parameters); err != nil {
-			return nil, fmt.Errorf("failed to parse the parameters of the '%s' scorer - %w", PromptWordBalancerType, err)
+			return nil, fmt.Errorf("failed to parse the parameters of the '%s' scorer - %w", PromptWordScorerType, err)
 		}
 	}
 
-	return NewPromptWordBalancer(handle.Context(), &parameters).WithName(name), nil
+	return NewPromptWordScorer(handle.Context(), &parameters).WithName(name), nil
 }
 
-// NewPromptWordBalancer creates a new PromptWordBalancer scorer.
-func NewPromptWordBalancer(ctx context.Context, params *PromptWordBalancerParameters) *PromptWordBalancer {
-	requestTimeout := defaultWordBalancerRequestTimeout
+// NewPromptWordScorer creates a new PromptWordScorer scorer.
+func NewPromptWordScorer(ctx context.Context, params *PromptWordScorerParameters) *PromptWordScorer {
+	requestTimeout := defaultWordScorerRequestTimeout
 	logger := log.FromContext(ctx)
 
 	if params != nil {
@@ -88,13 +88,13 @@ func NewPromptWordBalancer(ctx context.Context, params *PromptWordBalancerParame
 	}
 
 	// cache for individual requests with their own TTL
-	requestCache := ttlcache.New[string, *wordBalancerRequestEntry](
-		ttlcache.WithTTL[string, *wordBalancerRequestEntry](requestTimeout),
-		ttlcache.WithDisableTouchOnHit[string, *wordBalancerRequestEntry](),
+	requestCache := ttlcache.New[string, *wordScorerRequestEntry](
+		ttlcache.WithTTL[string, *wordScorerRequestEntry](requestTimeout),
+		ttlcache.WithDisableTouchOnHit[string, *wordScorerRequestEntry](),
 	)
 
-	scorer := &PromptWordBalancer{
-		typedName:     plugins.TypedName{Type: PromptWordBalancerType},
+	scorer := &PromptWordScorer{
+		typedName:     plugins.TypedName{Type: PromptWordScorerType},
 		requestCache:  requestCache,
 		podWordCounts: make(map[string]int64),
 		mutex:         &sync.RWMutex{},
@@ -104,7 +104,7 @@ func NewPromptWordBalancer(ctx context.Context, params *PromptWordBalancerParame
 	// most requests will be handled in ResponseComplete, but this ensures
 	// that we don't leak pod word counts if ResponseComplete is not called
 	requestCache.OnEviction(func(_ context.Context, reason ttlcache.EvictionReason,
-		item *ttlcache.Item[string, *wordBalancerRequestEntry]) {
+		item *ttlcache.Item[string, *wordScorerRequestEntry]) {
 		if reason == ttlcache.EvictionReasonExpired {
 			entry := item.Value()
 			if entry != nil {
@@ -115,18 +115,18 @@ func NewPromptWordBalancer(ctx context.Context, params *PromptWordBalancerParame
 		}
 	})
 
-	go cleanWordBalancerCachePeriodically(ctx, requestCache, requestTimeout)
+	go cleanWordScorerCachePeriodically(ctx, requestCache, requestTimeout)
 
 	return scorer
 }
 
-// PromptWordBalancer keeps track of in-flight prompt word counts
-// per pod to enable balanced distribution.
-type PromptWordBalancer struct {
+// PromptWordScorer keeps track of in-flight prompt word counts
+// per pod to enable scoring based on load.
+type PromptWordScorer struct {
 	typedName plugins.TypedName
 
 	// requestCache stores individual request entries with unique composite keys (podName.requestID)
-	requestCache *ttlcache.Cache[string, *wordBalancerRequestEntry]
+	requestCache *ttlcache.Cache[string, *wordScorerRequestEntry]
 
 	// podWordCounts maintains in-flight word counts per pod
 	podWordCounts map[string]int64
@@ -135,12 +135,12 @@ type PromptWordBalancer struct {
 }
 
 // TypedName returns the typed name of the plugin.
-func (s *PromptWordBalancer) TypedName() plugins.TypedName {
+func (s *PromptWordScorer) TypedName() plugins.TypedName {
 	return s.typedName
 }
 
 // WithName sets the name of the plugin.
-func (s *PromptWordBalancer) WithName(name string) *PromptWordBalancer {
+func (s *PromptWordScorer) WithName(name string) *PromptWordScorer {
 	s.typedName.Name = name
 	return s
 }
@@ -148,7 +148,7 @@ func (s *PromptWordBalancer) WithName(name string) *PromptWordBalancer {
 // Score scores the given pods based on their cumulative prompt word counts.
 // Pods with lower word counts receive higher scores.
 // The score is normalized to a range of 0-1.
-func (s *PromptWordBalancer) Score(ctx context.Context, _ *types.CycleState, _ *types.LLMRequest,
+func (s *PromptWordScorer) Score(ctx context.Context, _ *types.CycleState, _ *types.LLMRequest,
 	pods []types.Pod) map[types.Pod]float64 {
 	scoredPods := make(map[string]int64)
 	var maxCount int64
@@ -162,7 +162,7 @@ func (s *PromptWordBalancer) Score(ctx context.Context, _ *types.CycleState, _ *
 	}
 	s.mutex.RUnlock()
 
-	log.FromContext(ctx).V(logutil.DEBUG).Info("Prompt word balancer counts",
+	log.FromContext(ctx).V(logutil.DEBUG).Info("Prompt word scorer counts",
 		"podWordCounts", scoredPods, "maxCount", maxCount)
 
 	scoredPodsMap := make(map[types.Pod]float64, len(pods))
@@ -182,14 +182,14 @@ func (s *PromptWordBalancer) Score(ctx context.Context, _ *types.CycleState, _ *
 		}
 	}
 
-	log.FromContext(ctx).V(logutil.DEBUG).Info("Scored pods by word balance", "scores", scoredPodsMap)
+	log.FromContext(ctx).V(logutil.DEBUG).Info("Scored pods by word count", "scores", scoredPodsMap)
 	return scoredPodsMap
 }
 
 // PreRequest is called before a request is sent to the target pod.
 // It extracts the word count from the prompt, increments the pod's
 // cumulative word count, and creates a cache entry for tracking.
-func (s *PromptWordBalancer) PreRequest(
+func (s *PromptWordScorer) PreRequest(
 	ctx context.Context,
 	request *types.LLMRequest,
 	schedulingResult *types.SchedulingResult,
@@ -227,7 +227,7 @@ func (s *PromptWordBalancer) PreRequest(
 	}
 
 	// add to request cache
-	s.requestCache.Set(request.RequestId, &wordBalancerRequestEntry{
+	s.requestCache.Set(request.RequestId, &wordScorerRequestEntry{
 		PodNames:  podNames,
 		RequestID: request.RequestId,
 		WordCount: wordCount,
@@ -238,13 +238,13 @@ func (s *PromptWordBalancer) PreRequest(
 // ResponseComplete is called after a response is sent to the client.
 // It removes the request entry from the cache and decrements the word counts
 // of involved pods since the request is no longer in-flight.
-func (s *PromptWordBalancer) ResponseComplete(
+func (s *PromptWordScorer) ResponseComplete(
 	ctx context.Context,
 	request *types.LLMRequest,
 	_ *requestcontrol.Response,
 	targetPod *backend.Pod,
 ) {
-	debugLogger := log.FromContext(ctx).V(logutil.DEBUG).WithName("PromptWordBalancer.ResponseComplete")
+	debugLogger := log.FromContext(ctx).V(logutil.DEBUG).WithName("PromptWordScorer.ResponseComplete")
 	if targetPod == nil {
 		debugLogger.Info("Skipping ResponseComplete because targetPod is nil")
 		return
@@ -272,7 +272,7 @@ func (s *PromptWordBalancer) ResponseComplete(
 // extractWordCount extracts the word count from the request prompt.
 // For Completions: counts words in the prompt string.
 // For ChatCompletions: counts words across all message contents.
-func (s *PromptWordBalancer) extractWordCount(request *types.LLMRequest) (int64, error) {
+func (s *PromptWordScorer) extractWordCount(request *types.LLMRequest) (int64, error) {
 	if request == nil || request.Body == nil {
 		return 0, errors.New("request or body is nil")
 	}
@@ -302,7 +302,7 @@ func (s *PromptWordBalancer) extractWordCount(request *types.LLMRequest) (int64,
 }
 
 // incrementWordCount increments the word count for a pod.
-func (s *PromptWordBalancer) incrementWordCount(podName string, wordCount int64) {
+func (s *PromptWordScorer) incrementWordCount(podName string, wordCount int64) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -311,7 +311,7 @@ func (s *PromptWordBalancer) incrementWordCount(podName string, wordCount int64)
 
 // decrementWordCount decrements the word count for a pod and removes
 // the entry if count reaches zero or below.
-func (s *PromptWordBalancer) decrementWordCount(podName string, wordCount int64) {
+func (s *PromptWordScorer) decrementWordCount(podName string, wordCount int64) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -325,8 +325,8 @@ func (s *PromptWordBalancer) decrementWordCount(podName string, wordCount int64)
 	}
 }
 
-// cleanWordBalancerCachePeriodically periodically cleans up expired entries from the cache.
-func cleanWordBalancerCachePeriodically[K comparable, V any](ctx context.Context, cache *ttlcache.Cache[K, V], requestTimeout time.Duration) {
+// cleanWordScorerCachePeriodically periodically cleans up expired entries from the cache.
+func cleanWordScorerCachePeriodically[K comparable, V any](ctx context.Context, cache *ttlcache.Cache[K, V], requestTimeout time.Duration) {
 	ticker := time.NewTicker(requestTimeout)
 	defer ticker.Stop()
 

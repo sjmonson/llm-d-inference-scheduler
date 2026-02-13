@@ -16,9 +16,9 @@ import (
 	"github.com/llm-d/llm-d-inference-scheduler/test/utils"
 )
 
-// Test helper functions for PromptWordBalancer
+// Test helper functions for PromptWordScorer
 
-func newWordBalancerTestPod(name string) *types.PodMetrics {
+func newWordScorerTestPod(name string) *types.PodMetrics {
 	return &types.PodMetrics{
 		Pod:          &backend.Pod{NamespacedName: k8stypes.NamespacedName{Name: name, Namespace: "default"}},
 		MetricsState: &backendmetrics.MetricsState{},
@@ -47,13 +47,13 @@ func newChatCompletionsRequest(id string, messages []types.Message) *types.LLMRe
 	}
 }
 
-func (s *PromptWordBalancer) getWordCount(podName string) int64 {
+func (s *PromptWordScorer) getWordCount(podName string) int64 {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	return s.podWordCounts[podName]
 }
 
-func (s *PromptWordBalancer) hasWordCount(podName string) bool {
+func (s *PromptWordScorer) hasWordCount(podName string) bool {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 	_, exists := s.podWordCounts[podName]
@@ -62,36 +62,36 @@ func (s *PromptWordBalancer) hasWordCount(podName string) bool {
 
 // Factory Tests
 
-func TestPromptWordBalancer_ParameterParsing(t *testing.T) {
+func TestPromptWordScorer_ParameterParsing(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	t.Run("Default parameters", func(t *testing.T) {
-		scorer := NewPromptWordBalancer(ctx, nil)
+		scorer := NewPromptWordScorer(ctx, nil)
 		require.NotNil(t, scorer)
 	})
 
 	t.Run("Custom request timeout", func(t *testing.T) {
-		params := &PromptWordBalancerParameters{
+		params := &PromptWordScorerParameters{
 			RequestTimeout: "5m",
 		}
-		scorer := NewPromptWordBalancer(ctx, params)
+		scorer := NewPromptWordScorer(ctx, params)
 		assert.NotNil(t, scorer)
 	})
 
 	t.Run("Invalid request timeout uses default", func(t *testing.T) {
-		params := &PromptWordBalancerParameters{
+		params := &PromptWordScorerParameters{
 			RequestTimeout: "invalid",
 		}
-		scorer := NewPromptWordBalancer(ctx, params)
+		scorer := NewPromptWordScorer(ctx, params)
 		assert.NotNil(t, scorer)
 	})
 }
 
 // Word Extraction Tests
 
-func TestPromptWordBalancer_ExtractWordCount(t *testing.T) {
+func TestPromptWordScorer_ExtractWordCount(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	scorer := NewPromptWordBalancer(ctx, nil)
+	scorer := NewPromptWordScorer(ctx, nil)
 
 	t.Run("Completions with simple prompt", func(t *testing.T) {
 		request := newCompletionsRequest("test-1", "Hello world from AI")
@@ -170,20 +170,20 @@ func TestPromptWordBalancer_ExtractWordCount(t *testing.T) {
 
 // Scoring Tests
 
-func TestPromptWordBalancer_Score(t *testing.T) {
-	podA := newWordBalancerTestPod("pod-a")
-	podB := newWordBalancerTestPod("pod-b")
-	podC := newWordBalancerTestPod("pod-c")
+func TestPromptWordScorer_Score(t *testing.T) {
+	podA := newWordScorerTestPod("pod-a")
+	podB := newWordScorerTestPod("pod-b")
+	podC := newWordScorerTestPod("pod-c")
 
 	tests := []struct {
 		name       string
-		setupCache func(*PromptWordBalancer)
+		setupCache func(*PromptWordScorer)
 		input      []types.Pod
 		wantScores map[types.Pod]float64
 	}{
 		{
 			name: "no pods in cache - all score 1.0",
-			setupCache: func(_ *PromptWordBalancer) {
+			setupCache: func(_ *PromptWordScorer) {
 				// Cache is empty
 			},
 			input: []types.Pod{podA, podB, podC},
@@ -195,7 +195,7 @@ func TestPromptWordBalancer_Score(t *testing.T) {
 		},
 		{
 			name: "all pods with different word counts",
-			setupCache: func(s *PromptWordBalancer) {
+			setupCache: func(s *PromptWordScorer) {
 				s.mutex.Lock()
 				s.podWordCounts["default/pod-a"] = 100
 				s.podWordCounts["default/pod-b"] = 0
@@ -211,7 +211,7 @@ func TestPromptWordBalancer_Score(t *testing.T) {
 		},
 		{
 			name: "some pods in cache",
-			setupCache: func(s *PromptWordBalancer) {
+			setupCache: func(s *PromptWordScorer) {
 				s.mutex.Lock()
 				s.podWordCounts["default/pod-a"] = 150
 				s.podWordCounts["default/pod-c"] = 50
@@ -227,7 +227,7 @@ func TestPromptWordBalancer_Score(t *testing.T) {
 		},
 		{
 			name: "all pods at zero words",
-			setupCache: func(s *PromptWordBalancer) {
+			setupCache: func(s *PromptWordScorer) {
 				s.mutex.Lock()
 				s.podWordCounts["default/pod-a"] = 0
 				s.podWordCounts["default/pod-b"] = 0
@@ -241,7 +241,7 @@ func TestPromptWordBalancer_Score(t *testing.T) {
 		},
 		{
 			name: "equal word counts",
-			setupCache: func(s *PromptWordBalancer) {
+			setupCache: func(s *PromptWordScorer) {
 				s.mutex.Lock()
 				s.podWordCounts["default/pod-a"] = 100
 				s.podWordCounts["default/pod-b"] = 100
@@ -261,7 +261,7 @@ func TestPromptWordBalancer_Score(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := utils.NewTestContext(t)
 
-			scorer := NewPromptWordBalancer(ctx, nil)
+			scorer := NewPromptWordScorer(ctx, nil)
 			tt.setupCache(scorer)
 
 			got := scorer.Score(ctx, nil, nil, tt.input)
@@ -279,12 +279,12 @@ func TestPromptWordBalancer_Score(t *testing.T) {
 
 // PreRequest Tests
 
-func TestPromptWordBalancer_PreRequest(t *testing.T) {
+func TestPromptWordScorer_PreRequest(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	scorer := NewPromptWordBalancer(ctx, nil)
+	scorer := NewPromptWordScorer(ctx, nil)
 
-	podA := newWordBalancerTestPod("pod-a")
-	podB := newWordBalancerTestPod("pod-b")
+	podA := newWordScorerTestPod("pod-a")
+	podB := newWordScorerTestPod("pod-b")
 
 	testProfile := "test-profile"
 
@@ -372,12 +372,12 @@ func TestPromptWordBalancer_PreRequest(t *testing.T) {
 
 // ResponseComplete Tests
 
-func TestPromptWordBalancer_ResponseComplete(t *testing.T) {
+func TestPromptWordScorer_ResponseComplete(t *testing.T) {
 	t.Run("Word count removed on completion", func(t *testing.T) {
 		ctx := utils.NewTestContext(t)
-		scorer := NewPromptWordBalancer(ctx, nil)
+		scorer := NewPromptWordScorer(ctx, nil)
 
-		podA := newWordBalancerTestPod("pod-a")
+		podA := newWordScorerTestPod("pod-a")
 		request := newCompletionsRequest("test-request-1", "This is a test prompt")
 
 		// Setup: add request
@@ -399,10 +399,10 @@ func TestPromptWordBalancer_ResponseComplete(t *testing.T) {
 
 	t.Run("Multiple pods (P/D disaggregation)", func(t *testing.T) {
 		ctx := utils.NewTestContext(t)
-		scorer := NewPromptWordBalancer(ctx, nil)
+		scorer := NewPromptWordScorer(ctx, nil)
 
-		podA := newWordBalancerTestPod("pod-a")
-		podB := newWordBalancerTestPod("pod-b")
+		podA := newWordScorerTestPod("pod-a")
+		podB := newWordScorerTestPod("pod-b")
 		request := newCompletionsRequest("test-request-2", "Five word test prompt here")
 
 		// Setup: add request to both pods
@@ -427,9 +427,9 @@ func TestPromptWordBalancer_ResponseComplete(t *testing.T) {
 
 	t.Run("Request not in cache (already completed or TTL expired)", func(t *testing.T) {
 		ctx := utils.NewTestContext(t)
-		scorer := NewPromptWordBalancer(ctx, nil)
+		scorer := NewPromptWordScorer(ctx, nil)
 
-		podA := newWordBalancerTestPod("pod-a")
+		podA := newWordScorerTestPod("pod-a")
 		request := newCompletionsRequest("unknown-request", "Test")
 
 		// Call ResponseComplete without PreRequest
@@ -441,7 +441,7 @@ func TestPromptWordBalancer_ResponseComplete(t *testing.T) {
 
 	t.Run("Nil targetPod is skipped", func(t *testing.T) {
 		ctx := utils.NewTestContext(t)
-		scorer := NewPromptWordBalancer(ctx, nil)
+		scorer := NewPromptWordScorer(ctx, nil)
 
 		request := newCompletionsRequest("test-request-3", "Test prompt")
 
@@ -454,16 +454,16 @@ func TestPromptWordBalancer_ResponseComplete(t *testing.T) {
 
 // TTL and Cache Tests
 
-func TestPromptWordBalancer_TTLExpiration(t *testing.T) {
+func TestPromptWordScorer_TTLExpiration(t *testing.T) {
 	ctx := utils.NewTestContext(t)
 
 	// Use very short timeout for test
-	params := &PromptWordBalancerParameters{
+	params := &PromptWordScorerParameters{
 		RequestTimeout: "1s",
 	}
-	scorer := NewPromptWordBalancer(ctx, params)
+	scorer := NewPromptWordScorer(ctx, params)
 
-	podA := newWordBalancerTestPod("pod-a")
+	podA := newWordScorerTestPod("pod-a")
 	request := newCompletionsRequest("ttl-test-request", "Word word word word word")
 	schedulingResult := &types.SchedulingResult{
 		ProfileResults: map[string]*types.ProfileRunResult{
@@ -490,17 +490,17 @@ func TestPromptWordBalancer_TTLExpiration(t *testing.T) {
 
 // Metadata and Plugin Interface Tests
 
-func TestPromptWordBalancer_TypedName(t *testing.T) {
+func TestPromptWordScorer_TypedName(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	scorer := NewPromptWordBalancer(ctx, nil)
+	scorer := NewPromptWordScorer(ctx, nil)
 
-	assert.Equal(t, PromptWordBalancerType, scorer.TypedName().Type)
+	assert.Equal(t, PromptWordScorerType, scorer.TypedName().Type)
 }
 
-func TestPromptWordBalancer_WithName(t *testing.T) {
+func TestPromptWordScorer_WithName(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	scorer := NewPromptWordBalancer(ctx, nil)
-	testName := "custom-word-balancer"
+	scorer := NewPromptWordScorer(ctx, nil)
+	testName := "custom-word-scorer"
 
 	scorer = scorer.WithName(testName)
 
@@ -509,12 +509,12 @@ func TestPromptWordBalancer_WithName(t *testing.T) {
 
 // Thread Safety Test
 
-func TestPromptWordBalancer_ConcurrentAccess(t *testing.T) {
+func TestPromptWordScorer_ConcurrentAccess(t *testing.T) {
 	ctx := utils.NewTestContext(t)
-	scorer := NewPromptWordBalancer(ctx, nil)
+	scorer := NewPromptWordScorer(ctx, nil)
 
-	podA := newWordBalancerTestPod("pod-a")
-	podB := newWordBalancerTestPod("pod-b")
+	podA := newWordScorerTestPod("pod-a")
+	podB := newWordScorerTestPod("pod-b")
 
 	// This test should be run with -race flag to detect race conditions
 	// go test -race ./pkg/plugins/scorer
